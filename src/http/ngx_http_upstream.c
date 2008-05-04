@@ -1041,7 +1041,7 @@ ngx_http_upstream_process_header(ngx_event_t *rev)
         return;
     }
 
-    if (rc == NGX_ERROR || rc == NGX_HTTP_INTERNAL_SERVER_ERROR) {
+    if (rc == NGX_ERROR) {
         ngx_http_upstream_finalize_request(r, u,
                                            NGX_HTTP_INTERNAL_SERVER_ERROR);
         return;
@@ -1234,6 +1234,8 @@ ngx_http_upstream_process_header(ngx_event_t *rev)
 
     r->headers_out.status = u->headers_in.status_n;
     r->headers_out.status_line = u->headers_in.status_line;
+
+    u->headers_in.content_length_n = r->headers_out.content_length_n;
 
     if (r->headers_out.content_length_n != -1) {
         u->length = (size_t) r->headers_out.content_length_n;
@@ -1838,6 +1840,7 @@ ngx_http_upstream_process_downstream(ngx_http_request_t *r)
 static void
 ngx_http_upstream_process_body(ngx_event_t *ev)
 {
+    ngx_temp_file_t      *tf;
     ngx_event_pipe_t     *p;
     ngx_connection_t     *c, *downstream;
     ngx_http_log_ctx_t   *ctx;
@@ -1932,18 +1935,22 @@ ngx_http_upstream_process_body(ngx_event_t *ev)
 
         if (u->store) {
 
-            if (p->upstream_eof && u->headers_in.status_n == NGX_HTTP_OK) {
+            tf = u->pipe->temp_file;
 
+            if (p->upstream_eof
+                && u->headers_in.status_n == NGX_HTTP_OK
+                && (u->headers_in.content_length_n == -1
+                    || (u->headers_in.content_length_n == tf->offset)))
+            {
                 ngx_http_upstream_store(r, u);
 
             } else if ((p->upstream_error
                         || (p->upstream_eof
                             && u->headers_in.status_n != NGX_HTTP_OK))
-                       && u->pipe->temp_file->file.fd != NGX_INVALID_FILE)
+                       && tf->file.fd != NGX_INVALID_FILE)
             {
-                if (ngx_delete_file(u->pipe->temp_file->file.name.data)
-                    == NGX_FILE_ERROR)
-                {
+                if (ngx_delete_file(tf->file.name.data) == NGX_FILE_ERROR) {
+
                     ngx_log_error(NGX_LOG_CRIT, r->connection->log, ngx_errno,
                                   ngx_delete_file_n " \"%s\" failed",
                                   u->pipe->temp_file->file.name.data);
@@ -2535,6 +2542,10 @@ ngx_http_upstream_copy_content_type(ngx_http_request_t *r, ngx_table_elt_t *h,
         last = p;
 
         while (*++p == ' ') { /* void */ }
+
+        if (*p == '\0') {
+            return NGX_OK;
+        }
 
         if (ngx_strncasecmp(p, (u_char *) "charset=", 8) != 0) {
             continue;
@@ -3262,6 +3273,113 @@ ngx_http_upstream_add(ngx_conf_t *cf, ngx_url_t *u, ngx_uint_t flags)
     *uscfp = uscf;
 
     return uscf;
+}
+
+
+ngx_int_t
+ngx_http_upstream_hide_headers_hash(ngx_conf_t *cf,
+    ngx_http_upstream_conf_t *conf, ngx_http_upstream_conf_t *prev,
+    ngx_str_t *default_hide_headers, ngx_hash_init_t *hash)
+{
+    ngx_str_t       *h;
+    ngx_uint_t       i, j;
+    ngx_array_t      hide_headers;
+    ngx_hash_key_t  *hk;
+
+    if (conf->hide_headers == NGX_CONF_UNSET_PTR
+        && conf->pass_headers == NGX_CONF_UNSET_PTR)
+    {
+        conf->hide_headers_hash = prev->hide_headers_hash;
+
+        if (conf->hide_headers_hash.buckets) {
+            return NGX_OK;
+        }
+
+        conf->hide_headers = prev->hide_headers;
+        conf->pass_headers = prev->pass_headers;
+
+    } else {
+        if (conf->hide_headers == NGX_CONF_UNSET_PTR) {
+            conf->hide_headers = prev->hide_headers;
+        }
+
+        if (conf->pass_headers == NGX_CONF_UNSET_PTR) {
+            conf->pass_headers = prev->pass_headers;
+        }
+    }
+
+    if (ngx_array_init(&hide_headers, cf->temp_pool, 4, sizeof(ngx_hash_key_t))
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    for (h = default_hide_headers; h->len; h++) {
+        hk = ngx_array_push(&hide_headers);
+        if (hk == NULL) {
+            return NGX_ERROR;
+        }
+
+        hk->key = *h;
+        hk->key_hash = ngx_hash_key_lc(h->data, h->len);
+        hk->value = (void *) 1;
+    }
+
+    if (conf->hide_headers != NGX_CONF_UNSET_PTR) {
+
+        h = conf->hide_headers->elts;
+
+        for (i = 0; i < conf->hide_headers->nelts; i++) {
+
+            hk = hide_headers.elts;
+
+            for (j = 0; j < hide_headers.nelts; j++) {
+                if (ngx_strcasecmp(h[i].data, hk[j].key.data) == 0) {
+                    goto exist;
+                }
+            }
+
+            hk = ngx_array_push(&hide_headers);
+            if (hk == NULL) {
+                return NGX_ERROR;
+            }
+
+            hk->key = h[i];
+            hk->key_hash = ngx_hash_key_lc(h[i].data, h[i].len);
+            hk->value = (void *) 1;
+
+        exist:
+
+            continue;
+        }
+    }
+
+    if (conf->pass_headers != NGX_CONF_UNSET_PTR) {
+
+        h = conf->pass_headers->elts;
+        hk = hide_headers.elts;
+
+        for (i = 0; i < conf->pass_headers->nelts; i++) {
+            for (j = 0; j < hide_headers.nelts; j++) {
+
+                if (hk[j].key.data == NULL) {
+                    continue;
+                }
+
+                if (ngx_strcasecmp(h[i].data, hk[j].key.data) == 0) {
+                    hk[j].key.data = NULL;
+                    break;
+                }
+            }
+        }
+    }
+
+    hash->hash = &conf->hide_headers_hash;
+    hash->key = ngx_hash_key_lc;
+    hash->pool = cf->pool;
+    hash->temp_pool = NULL;
+
+    return ngx_hash_init(hash, hide_headers.elts, hide_headers.nelts);
 }
 
 
