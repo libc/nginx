@@ -1,4 +1,9 @@
 
+Changes with nginx 0.6.38                                        22 Jun 2009
+
+    *) Feature: the "keepalive_requests" directive.
+
+
 Changes with nginx 0.6.37                                        18 May 2009
 
     *) Feature: Microsoft specific "AUTH LOGIN with User Name" mode support 
