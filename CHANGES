@@ -1,4 +1,15 @@
 
+Changes with nginx 0.5.38                                        14 Sep 2009
+
+    *) Security: a segmentation fault might occur in worker process while 
+       specially crafted request handling.
+       Thanks to Chris Ries.
+
+    *) Bugfix: a segmentation fault might occur in worker process, if 
+       error_log was set to info or debug level.
+       Thanks to Sergey Bochenkov.
+
+
 Changes with nginx 0.5.37                                        07 Jul 2008
 
     *) Bugfix: if sub_filter and SSI were used together, then responses 
@@ -532,8 +543,8 @@ Changes with nginx 0.5.12                                        12 Feb 2007
        amd64, sparc, and ppc; the bug had appeared in 0.5.8.
 
     *) Bugfix: a segmentation fault might occur in worker process if the 
-       temporarily files were used while working with FastCGI server; the 
-       bug had appeared in 0.5.8.
+       temporary files were used while working with FastCGI server; the bug 
+       had appeared in 0.5.8.
 
     *) Bugfix: a segmentation fault might occur in worker process if the 
        $fastcgi_script_name variable was logged.
@@ -1075,7 +1086,7 @@ Changes with nginx 0.3.55                                        28 Jul 2006
     *) Bugfix: if the request contained "//" or "/./" and escaped symbols 
        after them, then the proxied request was sent unescaped.
 
-    *) Bugfix: the $r->headers_in("Cookie") of the ngx_http_perl_module now 
+    *) Bugfix: the $r->header_in("Cookie") of the ngx_http_perl_module now 
        returns all "Cookie" header lines.
 
     *) Bugfix: a segmentation fault occurred if 
@@ -1436,8 +1447,8 @@ Changes with nginx 0.3.31                                        10 Mar 2006
        in 0.3.18.
 
     *) Bugfix: if the HTTPS protocol was used in the "proxy_pass" directive 
-       and the request body was in temporarily file then the request was 
-       not transferred.
+       and the request body was in temporary file then the request was not 
+       transferred.
 
     *) Bugfix: perl 5.8.8 compatibility.
 
@@ -2589,8 +2600,8 @@ Changes with nginx 0.1.18                                        09 Feb 2005
     *) Bugfix: the proxy_set_x_var and fastcgi_set_var directives were not 
        inherited.
 
-    *) Bugfix: in the redirect rewrite directive the arguments were 
-       concatenated with URI by the "&" rather than the "?".
+    *) Bugfix: in a redirect rewrite directive arguments were concatenated 
+       with URI by an "&" rather than a "?".
 
     *) Bugfix: the lines without trailing ";" in the file being included by 
        the ngx_http_geo_module were silently ignored.
