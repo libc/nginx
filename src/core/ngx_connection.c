@@ -851,7 +851,7 @@ ngx_close_connection(ngx_connection_t *c)
     ngx_uint_t    log_error, level;
     ngx_socket_t  fd;
 
-    if (c->fd == -1) {
+    if (c->unclosable != 1 && c->fd == -1) {
         ngx_log_error(NGX_LOG_ALERT, c->log, 0, "connection already closed");
         return;
     }
@@ -930,7 +930,7 @@ ngx_close_connection(ngx_connection_t *c)
     fd = c->fd;
     c->fd = (ngx_socket_t) -1;
 
-    if (ngx_close_socket(fd) == -1) {
+    if (c->unclosable != 1 && ngx_close_socket(fd) == -1) {
 
         err = ngx_socket_errno;
 

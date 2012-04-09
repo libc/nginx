@@ -521,6 +521,12 @@ struct ngx_http_request_s {
     unsigned                          stat_writing:1;
 #endif
 
+#if (NGX_HTTP_SPDY)
+    unsigned                          spdy:1;
+    uint32_t                          stream_id;
+    void                             *spdy_request;
+#endif
+
     /* used to parse HTTP headers */
 
     ngx_uint_t                        state;
@@ -568,6 +574,11 @@ typedef struct {
 
 extern ngx_http_header_t       ngx_http_headers_in[];
 extern ngx_http_header_out_t   ngx_http_headers_out[];
+
+ngx_http_request_t *ngx_http_init_request_non_destructive(ngx_event_t *rev);
+ngx_int_t ngx_http_alloc_large_header_buffer(ngx_http_request_t *r, ngx_uint_t request_line);
+ngx_int_t ngx_http_process_request_header(ngx_http_request_t *r);
+void ngx_http_process_request(ngx_http_request_t *r);
 
 
 #endif /* _NGX_HTTP_REQUEST_H_INCLUDED_ */

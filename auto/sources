@@ -412,6 +412,10 @@ HTTP_SSL_MODULE=ngx_http_ssl_module
 HTTP_SSL_DEPS=src/http/modules/ngx_http_ssl_module.h
 HTTP_SSL_SRCS=src/http/modules/ngx_http_ssl_module.c
 
+HTTP_SPDY_MODULE=ngx_http_spdy_module
+HTTP_SPDY_DEPS=src/http/modules/ngx_http_spdy_module.h
+HTTP_SPDY_SRCS=src/http/modules/ngx_http_spdy_module.c
+
 
 HTTP_PROXY_MODULE=ngx_http_proxy_module
 HTTP_PROXY_SRCS=src/http/modules/ngx_http_proxy_module.c

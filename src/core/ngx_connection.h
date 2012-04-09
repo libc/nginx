@@ -79,7 +79,6 @@ struct ngx_listening_s {
 #if (NGX_HAVE_SETFIB)
     int                 setfib;
 #endif
-
 };
 
 
@@ -174,6 +173,10 @@ struct ngx_connection_s {
 #if (NGX_HAVE_AIO_SENDFILE)
     unsigned            aio_sendfile:1;
     ngx_buf_t          *busy_sendfile;
+#endif
+
+#if (NGX_HTTP_SPDY)
+    unsigned            unclosable:1;
 #endif
 
 #if (NGX_THREADS)

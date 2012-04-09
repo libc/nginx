@@ -9,10 +9,30 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <nginx.h>
+#if (NGX_HTTP_SPDY)
+#include <ngx_http_spdy_module.h>
+#endif
+
+#define BE_STORE_16(target, source) do { (target)[1] = (source) & 0xFF; (target)[0] = ((source) >> 8) & 0xFF; } while(0)
+#define BE_STORE_32(target, source) do { (target)[3] = (source) & 0xFF; (target)[2] = ((source) >> 8) & 0xFF; (target)[1] = ((source) >> 16) & 0xFF; (target)[0] = ((source) >> 24) & 0xFF; } while(0);
+
+#define BE_STORE_STRING(target, string) do { \
+    BE_STORE_16(target, sizeof(string) - 1); \
+    target += 2; \
+    target = ngx_cpymem(target, string, sizeof(string) - 1); \
+} while(0);
+#define BE_STORE_NGX_STRING(target, ngx_string) do { \
+    BE_STORE_16(target, (ngx_string).len); \
+    target += 2; \
+    target = ngx_cpymem(target, (ngx_string).data, (ngx_string).len); \
+} while(0);
 
 
 static ngx_int_t ngx_http_header_filter_init(ngx_conf_t *cf);
 static ngx_int_t ngx_http_header_filter(ngx_http_request_t *r);
+#if (NGX_HTTP_SPDY)
+static ngx_int_t ngx_http_spdy_header_filter(ngx_http_request_t *r);
+#endif
 
 
 static ngx_http_module_t  ngx_http_header_filter_module_ctx = {
@@ -169,6 +189,12 @@ ngx_http_header_filter(ngx_http_request_t *r)
     struct sockaddr_in6       *sin6;
 #endif
     u_char                     addr[NGX_SOCKADDR_STRLEN];
+
+#if (NGX_HTTP_SPDY)
+    if (r->spdy) {
+        return ngx_http_spdy_header_filter(r);
+    }
+#endif
 
     if (r->header_sent) {
         return NGX_OK;
@@ -612,6 +638,441 @@ ngx_http_header_filter(ngx_http_request_t *r)
 
     return ngx_http_write_filter(r, &out);
 }
+
+#if (NGX_HTTP_SPDY)
+static ngx_int_t
+ngx_http_spdy_header_filter(ngx_http_request_t *r)
+{
+    u_char                    *p;
+    size_t                     len, number_of_headers;
+    ngx_str_t                  host, *status_line;
+    ngx_buf_t                 *b;
+    ngx_uint_t                 status, i, port;
+    ngx_chain_t                out;
+    ngx_list_part_t           *part;
+    ngx_table_elt_t           *header;
+    ngx_connection_t          *c;
+    ngx_http_core_loc_conf_t  *clcf;
+    ngx_http_core_srv_conf_t  *cscf;
+    struct sockaddr_in        *sin;
+#if (NGX_HAVE_INET6)
+    struct sockaddr_in6       *sin6;
+#endif
+    u_char                     addr[NGX_SOCKADDR_STRLEN];
+
+    if (r->header_sent) {
+        return NGX_OK;
+    }
+
+    r->header_sent = 1;
+
+    if (r != r->main) {
+        return NGX_OK;
+    }
+
+    if (r->method == NGX_HTTP_HEAD) {
+        r->header_only = 1;
+    }
+
+    if (r->headers_out.last_modified_time != -1) {
+        if (r->headers_out.status != NGX_HTTP_OK
+            && r->headers_out.status != NGX_HTTP_PARTIAL_CONTENT
+            && r->headers_out.status != NGX_HTTP_NOT_MODIFIED)
+        {
+            r->headers_out.last_modified_time = -1;
+            r->headers_out.last_modified = NULL;
+        }
+    }
+
+    len = sizeof("NNNNversionNNHTTP/1.x") - 1;
+
+    /* status line */
+
+    len += sizeof("NNstatusNN") - 1;
+
+    number_of_headers = 2;
+
+    if (r->headers_out.status_line.len) {
+        len += r->headers_out.status_line.len;
+        status_line = &r->headers_out.status_line;
+#if (NGX_SUPPRESS_WARN)
+        status = 0;
+#endif
+
+    } else {
+
+        status = r->headers_out.status;
+
+        if (status >= NGX_HTTP_OK
+            && status < NGX_HTTP_LAST_2XX)
+        {
+            /* 2XX */
+
+            if (status == NGX_HTTP_NO_CONTENT) {
+                r->header_only = 1;
+                ngx_str_null(&r->headers_out.content_type);
+                r->headers_out.last_modified_time = -1;
+                r->headers_out.last_modified = NULL;
+                r->headers_out.content_length = NULL;
+                r->headers_out.content_length_n = -1;
+            }
+
+            status -= NGX_HTTP_OK;
+            status_line = &ngx_http_status_lines[status];
+            len += ngx_http_status_lines[status].len;
+
+        } else if (status >= NGX_HTTP_MOVED_PERMANENTLY
+                   && status < NGX_HTTP_LAST_3XX)
+        {
+            /* 3XX */
+
+            if (status == NGX_HTTP_NOT_MODIFIED) {
+                r->header_only = 1;
+            }
+
+            status = status - NGX_HTTP_MOVED_PERMANENTLY + NGX_HTTP_OFF_3XX;
+            status_line = &ngx_http_status_lines[status];
+            len += ngx_http_status_lines[status].len;
+
+        } else if (status >= NGX_HTTP_BAD_REQUEST
+                   && status < NGX_HTTP_LAST_4XX)
+        {
+            /* 4XX */
+            status = status - NGX_HTTP_BAD_REQUEST
+                            + NGX_HTTP_OFF_4XX;
+
+            status_line = &ngx_http_status_lines[status];
+            len += ngx_http_status_lines[status].len;
+
+        } else if (status >= NGX_HTTP_INTERNAL_SERVER_ERROR
+                   && status < NGX_HTTP_LAST_5XX)
+        {
+            /* 5XX */
+            status = status - NGX_HTTP_INTERNAL_SERVER_ERROR
+                            + NGX_HTTP_OFF_5XX;
+
+            status_line = &ngx_http_status_lines[status];
+            len += ngx_http_status_lines[status].len;
+
+        } else {
+            len += NGX_INT_T_LEN;
+            status_line = NULL;
+        }
+    }
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    if (r->headers_out.server == NULL) {
+        len += clcf->server_tokens ? sizeof(ngx_http_server_full_string) - 1:
+                                     sizeof(ngx_http_server_string) - 1;
+        len += 2;
+        number_of_headers++;
+    }
+
+    if (r->headers_out.date == NULL) {
+        len += sizeof("NNDateNNMon, 28 Sep 1970 06:00:00 GMT") - 1;
+        number_of_headers++;
+    }
+
+    if (r->headers_out.content_type.len) {
+        len += sizeof("NNContent-TypeNN") - 1
+               + r->headers_out.content_type.len;
+
+        if (r->headers_out.content_type_len == r->headers_out.content_type.len
+            && r->headers_out.charset.len)
+        {
+            len += sizeof("; charset=") - 1 + r->headers_out.charset.len;
+        }
+        number_of_headers++;
+    }
+
+    if (r->headers_out.content_length == NULL
+        && r->headers_out.content_length_n >= 0)
+    {
+        len += sizeof("NNContent-LengthNN") - 1 + NGX_OFF_T_LEN;
+        number_of_headers++;
+    }
+
+    if (r->headers_out.last_modified == NULL
+        && r->headers_out.last_modified_time != -1)
+    {
+        len += sizeof("NNLast-ModifiedNNMon, 28 Sep 1970 06:00:00 GMT") - 1;
+        number_of_headers++;
+    }
+
+    c = r->connection;
+
+    if (r->headers_out.location
+        && r->headers_out.location->value.len
+        && r->headers_out.location->value.data[0] == '/')
+    {
+        r->headers_out.location->hash = 0;
+
+        if (clcf->server_name_in_redirect) {
+            cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
+            host = cscf->server_name;
+
+        } else if (r->headers_in.server.len) {
+            host = r->headers_in.server;
+
+        } else {
+            host.len = NGX_SOCKADDR_STRLEN;
+            host.data = addr;
+
+            if (ngx_connection_local_sockaddr(c, &host, 0) != NGX_OK) {
+                return NGX_ERROR;
+            }
+        }
+
+        switch (c->local_sockaddr->sa_family) {
+
+#if (NGX_HAVE_INET6)
+        case AF_INET6:
+            sin6 = (struct sockaddr_in6 *) c->local_sockaddr;
+            port = ntohs(sin6->sin6_port);
+            break;
+#endif
+#if (NGX_HAVE_UNIX_DOMAIN)
+        case AF_UNIX:
+            port = 0;
+            break;
+#endif
+        default: /* AF_INET */
+            sin = (struct sockaddr_in *) c->local_sockaddr;
+            port = ntohs(sin->sin_port);
+            break;
+        }
+
+        len += sizeof("NNLocationNNhttps://") - 1
+               + host.len
+               + r->headers_out.location->value.len;
+        number_of_headers++;
+
+        if (clcf->port_in_redirect) {
+
+#if (NGX_HTTP_SSL)
+            if (c->ssl)
+                port = (port == 443) ? 0 : port;
+            else
+#endif
+                port = (port == 80) ? 0 : port;
+
+        } else {
+            port = 0;
+        }
+
+        if (port) {
+            len += sizeof(":65535") - 1;
+        }
+
+    } else {
+        ngx_str_null(&host);
+        port = 0;
+    }
+
+
+#if (NGX_HTTP_GZIP)
+    if (r->gzip_vary) {
+        if (clcf->gzip_vary) {
+            len += sizeof("NNVaryNNAccept-Encoding") - 1;
+            number_of_headers++;
+        } else {
+            r->gzip_vary = 0;
+        }
+    }
+#endif
+
+    part = &r->headers_out.headers.part;
+    header = part->elts;
+
+    for (i = 0; /* void */; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            header = part->elts;
+            i = 0;
+        }
+
+        if (header[i].hash == 0) {
+            continue;
+        }
+
+        len += 2 + header[i].key.len + 2 + header[i].value.len - 1;
+        number_of_headers++;
+    }
+
+    b = ngx_create_temp_buf(r->pool, len);
+    if (b == NULL) {
+        return NGX_ERROR;
+    }
+
+    BE_STORE_16(b->last, number_of_headers);
+    b->last += 2;
+
+    /* "HTTP/1.x " */
+    BE_STORE_STRING(b->last, "version")
+    BE_STORE_STRING(b->last, "HTTP/1.1")
+
+    /* status line */
+    BE_STORE_STRING(b->last, "status");
+    if (status_line) {
+        BE_STORE_NGX_STRING(b->last, *status_line);
+    } else {
+        p = ngx_sprintf(b->last+2, "%ui", status);
+        BE_STORE_16(b->last, p - b->last - 2);
+        b->last = p;
+    }
+
+    if (r->headers_out.server == NULL) {
+        if (clcf->server_tokens) {
+            p = (u_char *) ngx_http_server_full_string;
+            len = sizeof(ngx_http_server_full_string) - 1;
+
+        } else {
+            p = (u_char *) ngx_http_server_string;
+            len = sizeof(ngx_http_server_string) - 1;
+        }
+        p += sizeof("server: ") - 1;
+        len -= sizeof("server: ") - 1 + 2;
+
+        BE_STORE_STRING(b->last, "server");
+        BE_STORE_16(b->last, len);
+        b->last = ngx_cpymem(b->last + 2, p, len);
+    }
+
+    if (r->headers_out.date == NULL) {
+        BE_STORE_STRING(b->last, "date");
+        BE_STORE_NGX_STRING(b->last, ngx_cached_http_time);
+    }
+
+    if (r->headers_out.content_type.len) {
+        BE_STORE_STRING(b->last, "content-type");
+        p = b->last + 2;
+        b->last = ngx_copy(p, r->headers_out.content_type.data,
+                           r->headers_out.content_type.len);
+
+        if (r->headers_out.content_type_len == r->headers_out.content_type.len
+            && r->headers_out.charset.len)
+        {
+            b->last = ngx_cpymem(b->last, "; charset=",
+                                 sizeof("; charset=") - 1);
+            b->last = ngx_copy(b->last, r->headers_out.charset.data,
+                               r->headers_out.charset.len);
+
+            /* update r->headers_out.content_type for possible logging */
+
+            r->headers_out.content_type.len = b->last - p;
+            r->headers_out.content_type.data = p;
+        }
+        BE_STORE_16(p - 2, b->last - p);
+    }
+
+    if (r->headers_out.content_length == NULL
+        && r->headers_out.content_length_n >= 0)
+    {
+        BE_STORE_STRING(b->last, "content-length");
+        p = b->last + 2;
+        b->last = ngx_sprintf(p, "%O",
+                              r->headers_out.content_length_n);
+        BE_STORE_16(p - 2, b->last - p);
+    }
+
+    if (r->headers_out.last_modified == NULL
+        && r->headers_out.last_modified_time != -1)
+    {
+        BE_STORE_STRING(b->last, "last-modified");
+        p = b->last + 2;
+        b->last = ngx_http_time(p, r->headers_out.last_modified_time);
+        BE_STORE_16(p - 2, b->last - p);
+    }
+
+    if (host.data) {
+
+        BE_STORE_STRING(b->last, "location");
+        p = b->last + 2;
+        b->last = ngx_cpymem(p, "http",
+                             sizeof("http") - 1);
+
+#if (NGX_HTTP_SSL)
+        if (c->ssl) {
+            *b->last++ ='s';
+        }
+#endif
+
+        *b->last++ = ':'; *b->last++ = '/'; *b->last++ = '/';
+        b->last = ngx_copy(b->last, host.data, host.len);
+
+        if (port) {
+            b->last = ngx_sprintf(b->last, ":%ui", port);
+        }
+
+        b->last = ngx_copy(b->last, r->headers_out.location->value.data,
+                           r->headers_out.location->value.len);
+
+        /* update r->headers_out.location->value for possible logging */
+
+        r->headers_out.location->value.len = b->last - p;
+        r->headers_out.location->value.data = p;
+        ngx_str_set(&r->headers_out.location->key, "Location");
+
+        BE_STORE_16(p - 2, b->last - p);
+    }
+
+
+#if (NGX_HTTP_GZIP)
+    if (r->gzip_vary) {
+        BE_STORE_STRING(b->last, "vary");
+        BE_STORE_STRING(b->last, "accept-encoding");
+    }
+#endif
+
+    part = &r->headers_out.headers.part;
+    header = part->elts;
+
+    for (i = 0; /* void */; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+
+            part = part->next;
+            header = part->elts;
+            i = 0;
+        }
+
+        if (header[i].hash == 0) {
+            continue;
+        }
+
+        p = b->last + 2;
+        BE_STORE_NGX_STRING(b->last, header[i].key);
+        for(;p != b->last; ++p) {
+            *p = ngx_tolower(*p);
+        }
+
+        BE_STORE_NGX_STRING(b->last, header[i].value);
+    }
+
+    r->header_size = b->last - b->pos;
+
+    if (r->header_only) {
+        out.buf = ngx_create_temp_buf(r->pool, 2);
+        out.next = NULL;
+        out.buf->last_buf = 1;
+    } else {
+        out.buf = NULL;
+        out.next = NULL;
+    }
+
+    return ngx_http_spy_send_syn_reply(r, b);
+}
+#endif
+
 
 
 static ngx_int_t
