@@ -1605,6 +1605,10 @@ ngx_http_spdy_process_method(ngx_http_request_t *r,
     r->method_name.len = h->value.len;
     r->method_name.data = h->value.data;
 
+    /* There are 2 bytes we can use at the end! */
+    r->method_name.data[h->value.len] = ' ';
+    r->method_name.data[h->value.len + 1] = 0;
+
     /* TODO: move to ngx_http_parse.c so it could use the nice optimization */
     switch (h->value.len) {
         case 3:
@@ -3118,7 +3122,7 @@ ngx_http_set_lingering_close(ngx_http_request_t *r)
         }
     }
 
-    if (ngx_shutdown_socket(c->fd, NGX_WRITE_SHUTDOWN) == -1) {
+    if (!c->unclosable && ngx_shutdown_socket(c->fd, NGX_WRITE_SHUTDOWN) == -1) {
         ngx_connection_error(c, ngx_socket_errno,
                              ngx_shutdown_socket_n " failed");
         ngx_http_close_request(r, 0);

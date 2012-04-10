@@ -265,8 +265,35 @@ ngx_http_spdy_control_frame_noop(ngx_http_spdy_request_t *r)
 static ssize_t
 ngx_http_spdy_recv(ngx_connection_t *c, u_char *buf, size_t size)
 {
-    printf("spdy recv\n");
-    return NGX_AGAIN;
+    ngx_http_spdy_request_t *r;
+    ngx_http_request_t      *hr;
+    ssize_t                  n;
+
+    hr = c->data;
+    r = hr->spdy_request;
+    if (hr->stream_id != r->current_frame.data_frame.stream_id) {
+        printf("wrong stream_id %u %u\n", hr->stream_id, r->current_frame.data_frame.stream_id);
+        return NGX_AGAIN;
+    }
+
+    if (size > r->current_frame.length) {
+        size = r->current_frame.length;
+    }
+
+    if (size == 0) {
+        c->read->ready = 0;
+        return NGX_AGAIN;
+    }
+
+    n = r->connection->recv(r->connection, buf, size);
+
+    if (n == NGX_AGAIN || n == NGX_ERROR) {
+        return n;
+    }
+
+    r->current_frame.length -= n;
+
+    return n;
 }
 
 static ssize_t
@@ -293,6 +320,10 @@ ngx_http_spdy_send_with_flags(ngx_connection_t *c, u_char *data, size_t size, ui
     result = r->connection->send(r->connection, r->buffer_w->start, 8);
 
     if (result == NGX_ERROR || result == NGX_AGAIN) {
+        return result;
+    }
+
+    if (size == 0) {
         return result;
     }
 
@@ -387,6 +418,7 @@ ngx_http_spdy_create_connection(ngx_http_spdy_request_t *r)
     ngx_log_t                 *log;
 
     c = ngx_get_connection(-1, r->connection->log);
+    c->fd = r->connection->fd;
     cscf = r->fake_request->srv_conf[0];
 
     c->pool = ngx_create_pool(cscf->connection_pool_size, r->connection->log);
@@ -431,12 +463,41 @@ ngx_http_spdy_create_connection(ngx_http_spdy_request_t *r)
 }
 
 static ngx_http_spdy_stream_t *
+ngx_http_spdy_find_stream(ngx_http_spdy_request_t *r, uint32_t stream_id)
+{
+    return (ngx_http_spdy_stream_t *)ngx_radix32tree_find(r->streams, stream_id);
+}
+
+static void
+ngx_http_spdy_close_stream(void *data)
+{
+    ngx_http_spdy_stream_t  *s;
+    ngx_http_spdy_request_t *r;
+
+    s = data;
+    r = s->request->spdy_request;
+
+    printf("ngx_http_spdy_close_stream %d\n", s->request->stream_id);
+
+    if (s->request->connection->error) {
+        ngx_http_spdy_send_rst_stream(r, s->request->stream_id, NGX_SPDY_PROTOCOL_ERROR);
+    } else {
+        ngx_http_spdy_send_with_flags(s->request->connection, (u_char *)"", 0, NGX_SPDY_FLAGS_FIN);
+    }
+
+    ngx_radix32tree_delete(r->streams, s->request->stream_id, (uint32_t)-1);
+    ngx_pfree(r->connection->pool, s);
+}
+
+
+static ngx_http_spdy_stream_t *
 ngx_http_spdy_create_stream(ngx_http_spdy_request_t *r, uint32_t stream_id, uint8_t priority)
 {
     ngx_http_request_t     *hr;
     ngx_http_spdy_stream_t *s;
     ngx_connection_t       *c;
     uintptr_t               ptr;
+    ngx_pool_cleanup_t     *cleanup;
 
     ptr = ngx_radix32tree_find(r->streams, stream_id);
     if (ptr != NGX_RADIX_NO_VALUE) {
@@ -452,15 +513,26 @@ ngx_http_spdy_create_stream(ngx_http_spdy_request_t *r, uint32_t stream_id, uint
         ngx_http_spdy_send_rst_stream(r, stream_id, NGX_SPDY_INTERNAL_ERROR);
         return NULL;
     }
+
     hr->spdy = 1;
     hr->stream_id = stream_id;
     hr->spdy_request = r;
     c->data = hr;
+    c->ssl = NULL;
+
 
     s = ngx_pcalloc(r->connection->pool, sizeof(ngx_http_spdy_stream_t));
+    if (s == NULL) {
+        ngx_http_spdy_send_rst_stream(r, stream_id, NGX_SPDY_INTERNAL_ERROR);
+        return NULL;
+    }
     s->stream_id = stream_id;
     s->request = hr;
     s->priority = priority;
+
+    cleanup = ngx_pool_cleanup_add(hr->pool, 0);
+    cleanup->handler = ngx_http_spdy_close_stream;
+    cleanup->data = s;
 
     ngx_radix32tree_insert(r->streams, stream_id, (uint32_t)(-1), (uintptr_t)s);
 
@@ -555,7 +627,7 @@ ngx_http_spdy_parse_headers(ngx_http_spdy_stream_t *s, ngx_http_spdy_request_t *
     n = BE_LOAD_16(headers->pos);
     headers->pos += 2;
 
-    if (n > 0 && headers->last - headers->end == 0) {
+    if (n > 0 && headers->end - headers->last < 2) {
         /* We don't have a byte at the end of the buffer, so we
             cannot sneak \0 in. This is very sad. */
         ngx_http_spdy_send_rst_stream(r, s->stream_id, NGX_SPDY_INTERNAL_ERROR);
@@ -585,14 +657,14 @@ ngx_http_spdy_parse_headers(ngx_http_spdy_stream_t *s, ngx_http_spdy_request_t *
         k = BE_LOAD_16(headers->pos);
         headers->pos[0] = 0;
 
-        h->lowcase_key = ngx_pnalloc(hr->pool, h->key.len);
+        h->lowcase_key = ngx_pnalloc(hr->pool, h->key.len + 1);
         if (h->lowcase_key == NULL) {
             ngx_http_spdy_send_rst_stream(r, s->stream_id, NGX_SPDY_INTERNAL_ERROR);
             return;
         }
 
         /* header name in SPDY must be lower case */
-        ngx_memcpy(h->lowcase_key, h->key.data, h->key.len);
+        ngx_memcpy(h->lowcase_key, h->key.data, h->key.len + 1);
 
         h->hash = ngx_hash_key(h->lowcase_key, h->key.len);
 
@@ -608,6 +680,8 @@ ngx_http_spdy_parse_headers(ngx_http_spdy_stream_t *s, ngx_http_spdy_request_t *
                        "spdy header: \"%V: %V\"",
                        &h->key, &h->value);
     }
+
+    hr->header_in->pos = hr->header_in->last;
 }
 
 static int
@@ -701,9 +775,53 @@ ngx_http_spdy_read_control_frame(ngx_event_t *rev)
 }
 
 static void
+ngx_http_spdy_ignore_data_frame(ngx_event_t *rev)
+{
+    ngx_connection_t        *c;
+    ngx_http_spdy_request_t *r;
+    off_t                    n;
+
+    c = rev->data;
+    r = c->data;
+
+    for(;r->current_frame.length > 0;) {
+        n = r->buffer_r->end - r->buffer_r->pos;
+
+        if (n > r->current_frame.length) {
+            n = r->current_frame.length;
+        }
+
+        n = c->recv(c, r->buffer_r->pos, n);
+        if (n == NGX_AGAIN || n == NGX_ERROR) {
+            return;
+        }
+
+        r->current_frame.length -= n;
+    }
+
+    if (r->current_frame.length == 0) {
+        ngx_prepare_next_frame(r);
+    }
+}
+
+static void
 ngx_http_spdy_read_data_frame(ngx_event_t *rev)
 {
-    printf("data frame!\n");
+    ngx_connection_t        *c;
+    ngx_http_spdy_request_t *r;
+    ngx_http_spdy_stream_t  *s;
+
+    c = rev->data;
+    r = c->data;
+
+    s = ngx_http_spdy_find_stream(r, r->current_frame.data_frame.stream_id);
+    if (s == NULL) {
+        c->read->handler = ngx_http_spdy_ignore_data_frame;
+        c->read->handler(rev);
+    }
+
+    s->request->connection->read->ready = 1;
+    s->request->connection->read->handler(s->request->connection->read);
 }
 
 static void
