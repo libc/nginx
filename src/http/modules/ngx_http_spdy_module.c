@@ -565,9 +565,8 @@ ngx_http_spdy_unpack_headers(ngx_http_spdy_stream_t *s, ngx_http_spdy_request_t 
         return NGX_ERROR;
     }
 
+    headers->last = r->zstream_in.next_out;
     if (r->zstream_in.avail_in > 0) {
-        headers->last = r->zstream_in.next_out;
-
         rv = ngx_http_alloc_large_header_buffer(hr, 0);
         if (rv != NGX_OK) {
             return NGX_ERROR;
@@ -642,6 +641,10 @@ ngx_http_spdy_parse_headers(ngx_http_spdy_stream_t *s, ngx_http_spdy_request_t *
     for(i = 0; i < n; ++i) {
         h = ngx_list_push(&hr->headers_in.headers);
 
+        if (headers->pos + k + 2 > headers->last) {
+            ngx_http_spdy_send_rst_stream(r, s->stream_id, NGX_SPDY_INTERNAL_ERROR);
+            return;
+        }
         h->key.len = k;
         headers->pos += 2;
         h->key.data = headers->pos;
@@ -651,6 +654,10 @@ ngx_http_spdy_parse_headers(ngx_http_spdy_stream_t *s, ngx_http_spdy_request_t *
         headers->pos[0] = 0;
         headers->pos += 2;
 
+        if (headers->pos + k > headers->last) {
+            ngx_http_spdy_send_rst_stream(r, s->stream_id, NGX_SPDY_INTERNAL_ERROR);
+            return;
+        }
         h->value.len = k;
         h->value.data = headers->pos;
         headers->pos += k;
