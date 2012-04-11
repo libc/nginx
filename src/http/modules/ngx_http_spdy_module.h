@@ -45,6 +45,7 @@ typedef struct {
 } ngx_http_spdy_srv_conf_t;
 
 typedef struct {
+    ngx_queue_t         queue;
     ngx_http_request_t *request;
     uint32_t            stream_id;
     uint8_t             priority;
@@ -65,7 +66,7 @@ typedef struct ngx_http_spdy_request_s {
     z_stream                      zstream_in;
     z_stream                      zstream_out;
 
-    ngx_radix_tree_t             *streams;
+    ngx_queue_t                  *streams;
 
 } ngx_http_spdy_request_t;
 
