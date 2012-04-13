@@ -68,6 +68,9 @@ typedef struct ngx_http_spdy_request_s {
 
     ngx_queue_t                  *streams;
 
+    int32_t                       ping_id;
+    int32_t                       last_stream_id;
+
 } ngx_http_spdy_request_t;
 
 extern ngx_module_t ngx_http_spdy_module;

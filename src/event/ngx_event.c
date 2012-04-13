@@ -279,6 +279,13 @@ ngx_process_events_and_timers(ngx_cycle_t *cycle)
 ngx_int_t
 ngx_handle_read_event(ngx_event_t *rev, ngx_uint_t flags)
 {
+    ngx_connection_t  *c;
+
+    c = rev->data;
+    if (c->multiplexed) {
+        return NGX_OK;
+    }
+
     if (ngx_event_flags & NGX_USE_CLEAR_EVENT) {
 
         /* kqueue, epoll */
@@ -349,13 +356,18 @@ ngx_handle_write_event(ngx_event_t *wev, size_t lowat)
 {
     ngx_connection_t  *c;
 
-    if (lowat) {
-        c = wev->data;
+    c = wev->data;
 
+    if (lowat) {
         if (ngx_send_lowat(c, lowat) == NGX_ERROR) {
             return NGX_ERROR;
         }
     }
+
+    if (c->multiplexed) {
+        return NGX_OK;
+    }
+
 
     if (ngx_event_flags & NGX_USE_CLEAR_EVENT) {
 

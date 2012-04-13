@@ -793,7 +793,7 @@ ngx_get_connection(ngx_socket_t s, ngx_log_t *log)
 
     /* ngx_mutex_unlock */
 
-    if (ngx_cycle->files) {
+    if (ngx_cycle->files && s != (ngx_socket_t)-1) {
         ngx_cycle->files[s] = c;
     }
 
@@ -838,7 +838,7 @@ ngx_free_connection(ngx_connection_t *c)
 
     /* ngx_mutex_unlock */
 
-    if (!c->unclosable && ngx_cycle->files) {
+    if (!c->multiplexed && ngx_cycle->files) {
         ngx_cycle->files[c->fd] = NULL;
     }
 }
@@ -851,7 +851,7 @@ ngx_close_connection(ngx_connection_t *c)
     ngx_uint_t    log_error, level;
     ngx_socket_t  fd;
 
-    if (c->unclosable != 1 && c->fd == -1) {
+    if (c->multiplexed != 1 && c->fd == -1) {
         ngx_log_error(NGX_LOG_ALERT, c->log, 0, "connection already closed");
         return;
     }
@@ -864,19 +864,17 @@ ngx_close_connection(ngx_connection_t *c)
         ngx_del_timer(c->write);
     }
 
-    if (c->unclosable != 1) {
-      if (ngx_del_conn) {
-          ngx_del_conn(c, NGX_CLOSE_EVENT);
+    if (ngx_del_conn) {
+        ngx_del_conn(c, NGX_CLOSE_EVENT);
 
-      } else {
-          if (c->read->active || c->read->disabled) {
-              ngx_del_event(c->read, NGX_READ_EVENT, NGX_CLOSE_EVENT);
-          }
+    } else {
+        if (c->read->active || c->read->disabled) {
+            ngx_del_event(c->read, NGX_READ_EVENT, NGX_CLOSE_EVENT);
+        }
 
-          if (c->write->active || c->write->disabled) {
-              ngx_del_event(c->write, NGX_WRITE_EVENT, NGX_CLOSE_EVENT);
-          }
-      }
+        if (c->write->active || c->write->disabled) {
+            ngx_del_event(c->write, NGX_WRITE_EVENT, NGX_CLOSE_EVENT);
+        }
     }
 
 #if (NGX_THREADS)
@@ -932,7 +930,7 @@ ngx_close_connection(ngx_connection_t *c)
     fd = c->fd;
     c->fd = (ngx_socket_t) -1;
 
-    if (c->unclosable != 1 && ngx_close_socket(fd) == -1) {
+    if (c->multiplexed != 1 && ngx_close_socket(fd) == -1) {
 
         err = ngx_socket_errno;
 

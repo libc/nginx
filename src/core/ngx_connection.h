@@ -175,9 +175,7 @@ struct ngx_connection_s {
     ngx_buf_t          *busy_sendfile;
 #endif
 
-#if (NGX_HTTP_SPDY)
-    unsigned            unclosable:1;
-#endif
+    unsigned            multiplexed:1;
 
 #if (NGX_THREADS)
     ngx_atomic_t        lock;
