@@ -690,15 +690,23 @@ ngx_http_spdy_unpack_headers(ngx_http_spdy_stream_t *s, ngx_http_spdy_request_t 
         if (rv != NGX_OK) {
             return NGX_ERROR;
         }
+        ngx_memcpy(hr->header_in->start, headers->start, headers->last - headers->start);
+        hr->header_in->last = hr->header_in->start + (headers->last - headers->start);
 
         headers = hr->header_in;
         r->zstream_in.next_out = headers->last;
-        r->zstream_in.avail_out = headers->last - headers->end;
+        r->zstream_in.avail_out = headers->end - headers->last;
 
         zlib_result = inflate(&r->zstream_in, Z_SYNC_FLUSH);
         if (zlib_result != Z_OK) {
             return NGX_ERROR;
         }
+
+        if (r->zstream_in.avail_in > 0) {
+            return NGX_ERROR;
+        }
+
+        headers->last = r->zstream_in.next_out;
     }
 
     return NGX_OK;
