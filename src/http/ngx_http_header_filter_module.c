@@ -9,10 +9,11 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <nginx.h>
+
 #if (NGX_HTTP_SPDY)
 #include <ngx_http_spdy_module.h>
-#endif
 
+#define BE_LOAD_16(data) ((data)[1] | ((data)[0] << 8))
 #define BE_STORE_16(target, source) do { (target)[1] = (source) & 0xFF; (target)[0] = ((source) >> 8) & 0xFF; } while(0)
 #define BE_STORE_32(target, source) do { (target)[3] = (source) & 0xFF; (target)[2] = ((source) >> 8) & 0xFF; (target)[1] = ((source) >> 16) & 0xFF; (target)[0] = ((source) >> 24) & 0xFF; } while(0);
 
@@ -26,6 +27,7 @@
     target += 2; \
     target = ngx_cpymem(target, (ngx_string).data, (ngx_string).len); \
 } while(0);
+#endif
 
 
 static ngx_int_t ngx_http_header_filter_init(ngx_conf_t *cf);
@@ -640,17 +642,67 @@ ngx_http_header_filter(ngx_http_request_t *r)
 }
 
 #if (NGX_HTTP_SPDY)
+static int
+ngx_http_spdy_cmp_header(const void *left, const void *right)
+{
+    const ngx_table_elt_t *l, *r;
+    l = left;
+    r = right;
+
+    printf("comparing %s and %s\n", l->key.data, r->key.data);
+
+    if (l->hash == r->hash) {
+        return ngx_strcmp(l->key.data, r->key.data);
+    }
+
+    if (l->hash < r->hash) {
+        return -1;
+    } else {
+        return 1;
+    }
+}
+
+
+static ngx_table_elt_t **
+ngx_http_spdy_sort_headers(ngx_list_t *headers, ngx_pool_t *pool)
+{
+    size_t            number_of_headers, i;
+    ngx_list_part_t  *p;
+    ngx_table_elt_t **sorted, **c1, *c2;
+
+    number_of_headers = 0;
+
+    for(p = headers->part.next; p; p = p->next) {
+        number_of_headers += p->nelts;
+    }
+
+    sorted = ngx_palloc(pool, (number_of_headers + 1)*sizeof(*sorted));
+    c1 = sorted;
+    for (p = &headers->part; p; p = p->next) {
+        c2 = p->elts;
+        for (i = 0; i < p->nelts; ++i) {
+            *c1++ = &c2[i];
+        }
+    }
+    *c1 = 0;
+
+    qsort(sorted, number_of_headers, sizeof(*sorted), ngx_http_spdy_cmp_header);
+
+    return sorted;
+}
+
+
 static ngx_int_t
 ngx_http_spdy_header_filter(ngx_http_request_t *r)
 {
-    u_char                    *p;
+    u_char                    *p, *p_hdr_num;
     size_t                     len, number_of_headers;
     ngx_str_t                  host, *status_line;
     ngx_buf_t                 *b;
     ngx_uint_t                 status, i, port;
     ngx_chain_t                out;
     ngx_list_part_t           *part;
-    ngx_table_elt_t           *header;
+    ngx_table_elt_t           *header, **sorted_headers;
     ngx_connection_t          *c;
     ngx_http_core_loc_conf_t  *clcf;
     ngx_http_core_srv_conf_t  *cscf;
@@ -910,7 +962,7 @@ ngx_http_spdy_header_filter(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
-    BE_STORE_16(b->last, number_of_headers);
+    p_hdr_num = b->last;
     b->last += 2;
 
     /* "HTTP/1.x " */
@@ -1030,33 +1082,37 @@ ngx_http_spdy_header_filter(ngx_http_request_t *r)
     }
 #endif
 
-    part = &r->headers_out.headers.part;
-    header = part->elts;
+    sorted_headers = ngx_http_spdy_sort_headers(&r->headers_out.headers, r->pool);
 
-    for (i = 0; /* void */; i++) {
+    for (i = 0; sorted_headers[i]; i++) {
 
-        if (i >= part->nelts) {
-            if (part->next == NULL) {
-                break;
-            }
-
-            part = part->next;
-            header = part->elts;
-            i = 0;
+        if (sorted_headers[i]->hash == 0) {
+            continue;
         }
 
-        if (header[i].hash == 0) {
+        if (i > 0 && sorted_headers[i-1]->hash == sorted_headers[i]->hash &&
+            !ngx_strcmp(sorted_headers[i-1]->key.data, sorted_headers[i]->key.data)) {
+            *(b->last) = 0;
+
+            b->last = ngx_cpymem(b->last+1, sorted_headers[i]->value.data, sorted_headers[i]->value.len);
+            len = BE_LOAD_16(p) + 1 + sorted_headers[i]->value.len;
+            BE_STORE_16(p, len);
+
+            number_of_headers--;
             continue;
         }
 
         p = b->last + 2;
-        BE_STORE_NGX_STRING(b->last, header[i].key);
+        BE_STORE_NGX_STRING(b->last, sorted_headers[i]->key);
         for(;p != b->last; ++p) {
             *p = ngx_tolower(*p);
         }
 
-        BE_STORE_NGX_STRING(b->last, header[i].value);
+        p = b->last;
+        BE_STORE_NGX_STRING(b->last, sorted_headers[i]->value);
     }
+
+    BE_STORE_16(p_hdr_num, number_of_headers);
 
     r->header_size = b->last - b->pos;
 
