@@ -433,7 +433,7 @@ ngx_http_upstream_init(ngx_http_request_t *r)
 
     if (ngx_event_flags & NGX_USE_CLEAR_EVENT) {
 
-        if (!c->write->active) {
+        if (!c->write->active && !c->multiplexed) {
             if (ngx_add_event(c->write, NGX_WRITE_EVENT, NGX_CLEAR_EVENT)
                 == NGX_ERROR)
             {

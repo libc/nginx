@@ -34,6 +34,9 @@ static void ngx_http_spdy_control_frame_go_away(ngx_http_spdy_request_t *r);
 static void ngx_http_spdy_free_connection(ngx_connection_t *c);
 static void ngx_http_spdy_close_connection(ngx_http_spdy_request_t *r);
 
+static ngx_int_t ngx_http_spdy_enable_write(ngx_http_spdy_request_t *r);
+static void ngx_http_spdy_disable_write(ngx_http_spdy_request_t *r);
+
 static ngx_command_t  ngx_http_spdy_commands[] = {
     { ngx_string("spdy"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_CONF_FLAG,
@@ -229,6 +232,7 @@ ngx_http_spy_send_syn_reply(ngx_http_request_t *hr, ngx_buf_t *b)
     ngx_int_t                result;
     ngx_http_spdy_request_t *r;
     int                      zlib_result;
+    ngx_int_t                length_to_send;
 
     b_w = ngx_create_temp_buf(hr->pool, b->last - b->pos + 14);
 
@@ -240,6 +244,7 @@ ngx_http_spy_send_syn_reply(ngx_http_request_t *hr, ngx_buf_t *b)
     b_w->start[0] |= 0x80;          /* Control flag */
     BE_STORE_16(&b_w->start[2], 2); /* SYN_REPLY */
     BE_STORE_32(&b_w->start[8], hr->stream_id);
+    BE_STORE_32(&b_w->start[12], 0); /* reserved */
 
     r = hr->spdy_request;
 
@@ -254,8 +259,11 @@ ngx_http_spy_send_syn_reply(ngx_http_request_t *hr, ngx_buf_t *b)
         return NGX_ERROR;
     }
 
-    BE_STORE_32(&b_w->start[4], r->zstream_out.next_out - b_w->start - 8);
-    result = r->connection->send(r->connection, b_w->start, r->zstream_out.next_out - b_w->start);
+    b_w->last = r->zstream_out.next_out;
+    length_to_send = b_w->last - b_w->start;
+    BE_STORE_32(&b_w->start[4], length_to_send - 8);
+
+    result = r->connection->send(r->connection, b_w->start, length_to_send);
 
     ngx_pfree(hr->pool, b_w);
 
@@ -309,6 +317,8 @@ ngx_http_spdy_send_goaway(ngx_http_spdy_request_t *r)
 static void
 ngx_http_spdy_control_frame_noop(ngx_http_spdy_request_t *r)
 {
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "spdy: received noop");
 }
 
 static ssize_t
@@ -357,6 +367,20 @@ ngx_http_spdy_recv_chain(ngx_connection_t *c, ngx_chain_t *cl)
     return NGX_AGAIN;
 }
 
+static void
+ngx_http_spdy_interrupted_send(ngx_connection_t *c)
+{
+    ngx_http_request_t *hr;
+    ngx_http_spdy_request_t *r;
+
+    hr = c->data;
+    r = hr->spdy_request;
+
+    if (r->sending_connection == NULL) {
+        r->sending_connection = c;
+    }
+}
+
 static ssize_t
 ngx_http_spdy_send_with_flags(ngx_connection_t *c, u_char *data, size_t size, uint8_t flags)
 {
@@ -367,21 +391,36 @@ ngx_http_spdy_send_with_flags(ngx_connection_t *c, u_char *data, size_t size, ui
     hr = c->data;
     r = hr->spdy_request;
 
-    BE_STORE_32(r->buffer_w->start, hr->stream_id);
-    BE_STORE_32(&r->buffer_w->start[4], size);
-    r->buffer_w->start[4] = flags;
+    if (r->sending_connection != NULL && r->sending_connection != c) {
+        return NGX_AGAIN;
+    }
 
-    result = r->connection->send(r->connection, r->buffer_w->start, 8);
+    if (r->sending_connection == NULL) {
+        BE_STORE_32(r->buffer_w->start, hr->stream_id);
+        BE_STORE_32(&r->buffer_w->start[4], size);
+        r->buffer_w->start[4] = flags;
+
+        result = r->connection->send(r->connection, r->buffer_w->start, 8);
+
+        if (result == NGX_ERROR || result == NGX_AGAIN) {
+            return result;
+        }
+
+        if (size == 0) {
+            return result;
+        }
+    }
+
+    result = r->connection->send(r->connection, data, size);
 
     if (result == NGX_ERROR || result == NGX_AGAIN) {
+        r->sending_connection = c;
         return result;
     }
 
-    if (size == 0) {
-        return result;
-    }
+    r->sending_connection = NULL;
 
-    return r->connection->send(r->connection, data, size);
+    return result;
 }
 
 static ssize_t
@@ -393,14 +432,14 @@ ngx_http_spdy_send(ngx_connection_t *c, u_char *data, size_t size)
 static ngx_chain_t *
 ngx_http_spdy_send_chain(ngx_connection_t *c, ngx_chain_t *in, off_t limit)
 {
-    off_t sent, len, n;
+    off_t len, n;
+    uint8_t last_block;
 
-    sent = 0;
     if (limit == 0) {
         limit = NGX_SPDY_DATA_FRAME_SIZE;
     }
 
-    for (;sent < limit;) {
+    for (;limit > 0;) {
         if (in == NULL) {
             break;
         }
@@ -414,25 +453,28 @@ ngx_http_spdy_send_chain(ngx_connection_t *c, ngx_chain_t *in, off_t limit)
 
         if (len > limit) {
             len = limit;
+            last_block = 0;
+        } else {
+            last_block = in->buf->last_buf;
         }
-        n = ngx_http_spdy_send_with_flags(c, in->buf->pos, len, in->buf->last_buf ? NGX_SPDY_FLAGS_FIN : 0);
+        n = ngx_http_spdy_send_with_flags(c, in->buf->pos, len, last_block ? NGX_SPDY_FLAGS_FIN : 0);
 
         if (n == NGX_ERROR) {
             return NGX_CHAIN_ERROR;
         }
 
         if (n == NGX_AGAIN) {
-            return in;
-        }
-
-        if (n != len) {
-            printf("PANIC!!!!");
+            ngx_http_spdy_interrupted_send(c);
             return in;
         }
 
         in->buf->pos += n;
-        sent += n;
         limit -= n;
+
+        if (n != len) {
+            ngx_http_spdy_interrupted_send(c);
+            return in;
+        }
 
         if (in->buf->pos == in->buf->last) {
             in = in->next;
@@ -512,6 +554,8 @@ ngx_http_spdy_create_connection(ngx_http_spdy_request_t *r)
     c->tcp_nodelay = NGX_TCP_NODELAY_DISABLED;
     c->multiplexed = 1;
 
+    ngx_http_spdy_enable_write(r);
+
     return c;
 }
 
@@ -522,7 +566,7 @@ ngx_http_spdy_find_stream(ngx_http_spdy_request_t *r, uint32_t stream_id)
 
     s = (ngx_http_spdy_stream_t *)ngx_queue_head(r->streams);
     sentinel = (ngx_http_spdy_stream_t *)ngx_queue_sentinel(r->streams);
-    for(;s != sentinel;) {
+    for (;s != sentinel;) {
         if (s->stream_id == stream_id) {
             return s;
         }
@@ -548,6 +592,10 @@ ngx_http_spdy_close_stream(void *data)
     }
 
     ngx_queue_remove(&s->queue);
+
+    if (ngx_queue_empty(r->streams)) {
+        ngx_http_spdy_disable_write(r);
+    }
 }
 
 static void
@@ -556,7 +604,7 @@ ngx_close_all_streams(ngx_http_spdy_request_t *r)
     ngx_http_spdy_stream_t *s, *sentinel;
 
     sentinel = (ngx_http_spdy_stream_t *)ngx_queue_sentinel(r->streams);
-    for(;;) {
+    for (;;) {
         s = (ngx_http_spdy_stream_t *)ngx_queue_head(r->streams);
         if (s == sentinel) {
             break;
@@ -947,7 +995,7 @@ ngx_http_spdy_ignore_data_frame(ngx_event_t *rev)
     c = rev->data;
     r = c->data;
 
-    for(;r->current_frame.length > 0;) {
+    for (;r->current_frame.length > 0;) {
         n = r->buffer_r->end - r->buffer_r->pos;
 
         if (n > r->current_frame.length) {
@@ -1095,31 +1143,63 @@ void ngx_http_spdy_process_frame(ngx_event_t *rev)
     }
 }
 
+static ngx_int_t
+ngx_http_spdy_enable_write(ngx_http_spdy_request_t *r)
+{
+    ngx_event_t *wev;
+
+    wev = r->connection->write;
+
+    if (ngx_handle_write_event(wev, 0) == NGX_ERROR) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_event_flags & NGX_USE_CLEAR_EVENT) {
+
+        if (!wev->active) {
+            if (ngx_add_event(wev, NGX_WRITE_EVENT, NGX_CLEAR_EVENT) == NGX_ERROR) {
+                return NGX_ERROR;
+            }
+        }
+    }
+
+    return NGX_OK;
+}
+
+static void
+ngx_http_spdy_disable_write(ngx_http_spdy_request_t *r)
+{
+    ngx_connection_t *c;
+
+    c = r->connection;
+
+    if (ngx_event_flags & NGX_USE_CLEAR_EVENT) {
+        if (c->write->active || c->write->disabled) {
+            ngx_del_event(c->write, NGX_WRITE_EVENT, NGX_CLEAR_EVENT);
+        }
+    }
+}
+
 static void
 ngx_http_spdy_request_handler(ngx_event_t *ev)
 {
-    printf("write handler!\n");
-    // ngx_connection_t    *c;
-    // ngx_http_request_t  *r;
-    // ngx_http_log_ctx_t  *ctx;
+    ngx_connection_t         *c;
+    ngx_http_spdy_request_t  *r;
+    ngx_http_spdy_stream_t   *s, *sentinel, *s_next;
+    ngx_event_t              *wev;
 
-    // c = ev->data;
-    // r = c->data;
+    c = ev->data;
+    r = c->data;
 
-    // ctx = c->log->data;
-    // ctx->current_request = r;
+    s = (ngx_http_spdy_stream_t *)ngx_queue_head(r->streams);
+    sentinel = (ngx_http_spdy_stream_t *)ngx_queue_sentinel(r->streams);
+    for (;s != sentinel;s = s_next) {
+        s_next = (ngx_http_spdy_stream_t *)ngx_queue_next(&s->queue);
 
-    // ngx_log_debug2(NGX_LOG_DEBUG_HTTP, c->log, 0,
-    //                "http run request: \"%V?%V\"", &r->uri, &r->args);
+        wev =  s->request->connection->write;
+        wev->ready = 1;
+        wev->handler(wev);
 
-    // if (ev->write) {
-    //     r->write_event_handler(r);
-
-    // } else {
-    //     r->read_event_handler(r);
-    // }
-
-    // ngx_http_run_posted_requests(c);
+        ngx_http_run_posted_requests(s->request->connection);
+    }
 }
-
-

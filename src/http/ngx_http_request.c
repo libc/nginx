@@ -1818,6 +1818,7 @@ ngx_http_spdy_process_url(ngx_http_request_t *r,
     r->valid_unparsed_uri = r->space_in_uri ? 0 : 1;
 
     if (seen_dot) {
+        seen_dot++;
         if (seen_quote) {
             r->exten.len = seen_quote - 1 - seen_dot;
         } else {
@@ -1826,7 +1827,6 @@ ngx_http_spdy_process_url(ngx_http_request_t *r,
 
         r->exten.data = seen_dot;
     }
-
 
     if (seen_quote) {
         r->args.len = r->unparsed_uri.len - (seen_quote - r->unparsed_uri.data);
@@ -2672,7 +2672,9 @@ ngx_http_block_reading(ngx_http_request_t *r)
     /* aio does not call this handler */
 
     if ((ngx_event_flags & NGX_USE_LEVEL_EVENT)
-        && r->connection->read->active)
+        && r->connection->read->active
+        && !r->connection->multiplexed
+        )
     {
         if (ngx_del_event(r->connection->read, NGX_READ_EVENT, 0) != NGX_OK) {
             ngx_http_close_request(r, 0);
@@ -2734,7 +2736,7 @@ ngx_http_test_reading(ngx_http_request_t *r)
 
     /* aio does not call this handler */
 
-    if ((ngx_event_flags & NGX_USE_LEVEL_EVENT) && rev->active) {
+    if ((ngx_event_flags & NGX_USE_LEVEL_EVENT) && rev->active && !c->multiplexed) {
 
         if (ngx_del_event(rev, NGX_READ_EVENT, 0) != NGX_OK) {
             ngx_http_close_request(r, 0);
@@ -2919,7 +2921,7 @@ ngx_http_set_keepalive(ngx_http_request_t *r)
 
     rev->handler = ngx_http_keepalive_handler;
 
-    if (wev->active && (ngx_event_flags & NGX_USE_LEVEL_EVENT)) {
+    if (wev->active && (ngx_event_flags & NGX_USE_LEVEL_EVENT) && !c->multiplexed) {
         if (ngx_del_event(wev, NGX_WRITE_EVENT, 0) != NGX_OK) {
             ngx_http_close_connection(c);
             return;
@@ -3115,7 +3117,7 @@ ngx_http_set_lingering_close(ngx_http_request_t *r)
     wev = c->write;
     wev->handler = ngx_http_empty_handler;
 
-    if (wev->active && (ngx_event_flags & NGX_USE_LEVEL_EVENT)) {
+    if (wev->active && (ngx_event_flags & NGX_USE_LEVEL_EVENT) && !c->multiplexed) {
         if (ngx_del_event(wev, NGX_WRITE_EVENT, 0) != NGX_OK) {
             ngx_http_close_request(r, 0);
             return;

@@ -864,17 +864,19 @@ ngx_close_connection(ngx_connection_t *c)
         ngx_del_timer(c->write);
     }
 
-    if (ngx_del_conn) {
-        ngx_del_conn(c, NGX_CLOSE_EVENT);
+    if (c->multiplexed != 1) {
+      if (ngx_del_conn) {
+          ngx_del_conn(c, NGX_CLOSE_EVENT);
 
-    } else {
-        if (c->read->active || c->read->disabled) {
-            ngx_del_event(c->read, NGX_READ_EVENT, NGX_CLOSE_EVENT);
-        }
+      } else {
+          if (c->read->active || c->read->disabled) {
+              ngx_del_event(c->read, NGX_READ_EVENT, NGX_CLOSE_EVENT);
+          }
 
-        if (c->write->active || c->write->disabled) {
-            ngx_del_event(c->write, NGX_WRITE_EVENT, NGX_CLOSE_EVENT);
-        }
+          if (c->write->active || c->write->disabled) {
+              ngx_del_event(c->write, NGX_WRITE_EVENT, NGX_CLOSE_EVENT);
+          }
+      }
     }
 
 #if (NGX_THREADS)

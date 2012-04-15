@@ -414,6 +414,11 @@ ngx_kqueue_set_event(ngx_event_t *ev, ngx_int_t filter, ngx_uint_t flags)
                    "kevent set event: %d: ft:%i fl:%04Xi",
                    c->fd, filter, flags);
 
+    if (c->multiplexed) {
+        ngx_log_error(NGX_LOG_ALERT, ev->log, ngx_errno, "attempting to add multiplexed event");
+        return NGX_ERROR;
+    }
+
     if (nchanges >= max_changes) {
         ngx_log_error(NGX_LOG_WARN, ev->log, 0,
                       "kqueue change list is filled up");
