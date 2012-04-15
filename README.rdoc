@@ -1,0 +1,16 @@
+This is work in progress implementation of SPDY draft 2 for nginx!
+
+It is work in progress, so if you use this on a production system you might get cancer, die or worse. Just don't do it, ok?
+
+Although you are strongly advised to not use it on a production, if you try it on your development system, you'll receive 10 years of happines or something like that.
+
+It uses SSL_CTX_set_next_protos_advertised_cb for NPN, so openssl 1.0.1 is a must. It probably won't compile with everything lower.
+
+If you're an experienced nginx programmer, the code might seem a bit weird to you, well, that's because I'm not an experienced nginx programmer.
+
+== Known issues
+
+* Receiving of RST stream is not supported, so if browser wants to cancel the stream, it won't be able to do so.
+* No server push
+* Pages with lots of subrequests seem to cause protocol errors.
+* Can't handle headers larger than 8k
