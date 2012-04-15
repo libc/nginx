@@ -289,9 +289,7 @@ ngx_http_init_request_non_destructive(ngx_event_t *rev)
 
     c->requests++;
 
-    /* TODO: check if c->data is really always NULL at this point */
-    hc = NULL;
-    /* It was: hc = c->data; */
+    hc = c->data;
 
     if (hc == NULL) {
         hc = ngx_pcalloc(c->pool, sizeof(ngx_http_connection_t));

@@ -70,7 +70,9 @@ typedef struct ngx_http_spdy_request_s {
 
     int32_t                       ping_id;
     int32_t                       last_stream_id;
+
     ngx_connection_t             *sending_connection;
+    ngx_chain_t                  *out;
 
 } ngx_http_spdy_request_t;
 

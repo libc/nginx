@@ -12,5 +12,4 @@ If you're an experienced nginx programmer, the code might seem a bit weird to yo
 
 * Receiving of RST stream is not supported, so if browser wants to cancel the stream, it won't be able to do so.
 * No server push
-* Pages with lots of subrequests seem to cause protocol errors.
 * Can't handle headers larger than 8k
